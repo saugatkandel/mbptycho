@@ -47,7 +47,7 @@ class SampleParams:
     grain_height = 0.5 # edge-to-edge distance in y
     film_thickness: float = 0.1 # in microns
     lattice: List[float] = dt.field(default_factory=lambda: np.array([0.0003905] * 3))
-    strain_type: str = '3'
+    strain_type: str = 'point_inclusion'
     random_scaled_amplitudes: bool = True
 
 
@@ -87,6 +87,7 @@ def reloadSimulation(fname,
                      reload_sample_only_filename:str=None, 
                      new_sim_params:dict = None, 
                      new_extra_sample_params:dict = None):
+
     if reload_sim:
         if os.path.exists(fname):
             print('File exists. Reloading...')
@@ -142,12 +143,12 @@ class Sample:
             self._setStrain3()
         elif strain_type == '2':
             self._setStrain2()
-        elif strain_type == '1':
-            self._setStrain1()
+        elif strain_type == 'point_inclusion':
+            self._setStrainPointInclusion()
         else:
             raise ValueError()
     
-    def _setStrain1(self):
+    def _setStrainPointInclusion(self):
         self.strain_params = PointInclusionStrainParams()
         
         # getting the random terminii
@@ -238,7 +239,7 @@ class Sample:
         
         projection = (unit[None, :] @ pts).T
         
-        U = np.reshape(mag * np.cos(np.pi * projection / lam_cdw), self.XX_full.shape)
+        U = np.reshape(mag * np.cos(np.pi * projection / self.strain_params.wavelength), self.XX_full.shape)
         self.Ux_full = U * np.cos(theta) * self.obj_mask_full
         self.Uy_full = U * np.sin(theta) * self.obj_mask_full
         self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full * np.sign(self.ZZ_full)        
@@ -295,8 +296,7 @@ class Sample:
         rhos = scaling_per_peak[:,None,None,None] * amplitudes[None, ...] * phase_term
         self.rhos = rhos * self.obj_mask_trunc
         self.amplitudes_trunc_mask = amplitudes.astype('bool')
-        
-        plt.pcolormesh(np.abs())
+
         return rhos
     
     def truncateNumericalWindow(self, pad=2, xy_scan=True) -> np.ndarray:
