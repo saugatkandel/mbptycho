@@ -10,7 +10,7 @@ setup(
     #package_data={'data': ['*.png']},
     scripts=[],
     description='Multi-peak bragg ptychography',
-    requires=[
+    install_requires=[
         "numpy",
         "scipy",
         "matplotlib",
