@@ -15,6 +15,7 @@ setup(
         "scipy",
         "matplotlib",
         "tensorflow",
-        "scikit-image"
+        "scikit-image",
+        "tensorflow-probability"
     ],
 )

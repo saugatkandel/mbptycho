@@ -5,6 +5,7 @@ from scipy.interpolate import RegularGridInterpolator
 import dill
 import os
 import abc
+import gzip
 
 @dt.dataclass
 class SimulationParams:
