@@ -6,26 +6,33 @@ sys.path.append('../')
 
 from mbptycho.code.simulation import Simulation, reloadSimulation
 from skimage.feature import register_translation
+from skimage.restoration import unwrap_phase
 
 import tensorflow_probability as tfp
+from sopt.optimizers.tensorflow import NonLinearConjugateGradient
 
 
 class ReconstructionT:
     def __init__(self, simulation: Simulation,
-                 batch_size: int = 50, 
-                 reconstruct_phases_only: bool = False,
+                 batch_size: int = 50,
+                 reconstruction_type: str = "displacement",
+                 #reconstruct_phases_only: bool = False,
                  amplitudes_init: np.ndarray = None, 
                  ux_uy_init: np.ndarray = None, 
                  phases_init: np.ndarray = None,
                  displacement_tv_reg_const: float = None):
         self.sim = simulation
         self.batch_size = batch_size
-        self.reconstruct_phases_only = reconstruct_phases_only
+
+        if reconstruction_type not in ["displacement", "phase", "alternating"]:
+            raise ValueError("Supplied reconstruction type is not supported.")
+        self.reconstruction_type = reconstruction_type
+
         self.setPixelsAndPads()
         self.setGroundTruths()
         
         self.displacement_tv_reg_const = displacement_tv_reg_const
-        
+
         with tf.device('/gpu:0'):
             self.coords_t = tf.constant(self.sim.simulations_per_peak[0].nw_coords_stacked, dtype='float32')
             
@@ -45,11 +52,12 @@ class ReconstructionT:
             self.amplitudes_v = tf.Variable(amplitudes_init,  
                                             constraint = self.constraint_fn, 
                                             dtype='float32')
-            if not self.reconstruct_phases_only: 
+            if self.reconstruction_type != "phases":
                 if ux_uy_init is None:
                     ux_uy_init = np.ones(self.npix_xy * 2)
                 self.ux_uy_2d_v = tf.Variable(ux_uy_init, dtype='float32')
-            else:
+
+            if self.reconstruction_type != "displacement":
                 self.phases_v = tf.Variable(tf.zeros(self.npix_xy * self.sim.params.HKL_list.shape[0]),
                                             dtype='float32')
         
@@ -242,17 +250,22 @@ class ReconstructionT:
     
     def getNumpyOutputs(self):
         amplitudes_2d_all_t = self.getAmplitudes2D(self.amplitudes_v)
-        if not self.reconstruct_phases_only:
+
+        outs = {'amplitudes': amplitudes_2d_all_t.numpy()}
+
+        if self.reconstruction_type != "phase":
             ux_2d_t, uy_2d_t = self.getUxUy2d(self.ux_uy_2d_v)
             uz_2d_t = tf.zeros_like(ux_2d_t)
 
             rho_2d_cmplx_all_t = self.get2dRhoFromNormalizedDisplacements(ux_2d_t, uy_2d_t, uz_2d_t, amplitudes_2d_all_t)
-            outs = [x.numpy() for x in [amplitudes_2d_all_t, ux_2d_t, uy_2d_t, rho_2d_cmplx_all_t]]
-        
-        else:
+            outs['ux'] = ux_2d_t.numpy()
+            outs['uy'] = uy_2d_t.numpy()
+            outs['rho_2d_disp'] = rho_2d_cmplx_all_t.numpy()
+
+        if self.reconstruction_type != "displacement":
             rho_2d_cmplx_all_t = self.get2dRhoFromPhases(self.phases_v, self.amplitudes_v)
-            outs = [x.numpy() for x in [amplitudes_2d_all_t, rho_2d_cmplx_all_t]]
-        
+            outs['rho_2d_phase'] = rho_2d_cmplx_all_t.numpy()
+
         return outs
     
         
@@ -388,10 +401,10 @@ class ReconstructionT:
         return self._batchPredictFromDisplacementsAmplitudes(ux_uy_2d_v, self.amplitudes_v)
     
     def amplitudesPredictFn(self, amplitudes_v):
-        if self.reconstruct_phases_only:
-            return self._batchPredictFromPhasesAmplitudes(self.phases_v, amplitudes_v)
-        else:
+        if self.reconstruction_type == "displacement":
             return self._batchPredictFromDisplacementsAmplitudes(self.ux_uy_2d_v, amplitudes_v)
+        else:
+            return self._batchPredictFromPhasesAmplitudes(self.phases_v, amplitudes_v)
     
     @tf.function
     def loss_fn(self, predicted_data_t):
@@ -415,6 +428,7 @@ class ReconstructionT:
     def setPhaseAdamOptimizer(self, learning_rate):
         self.optimizers['phase'] = {'optimizer': tf.keras.optimizers.Adam(learning_rate),
                                     'var': self.phases_v}
+
     
     def tv_loss_fn(self):
         ux_2d_t, uy_2d_t = self.getUxUy2d(self.ux_uy_2d_v)
@@ -423,26 +437,45 @@ class ReconstructionT:
         tv_total = self.displacement_tv_reg_const * (tvx + tvy)
         return tv_total
     
-    def fit_fn(self):
-        if self.reconstruct_phases_only:
-            return self.loss_fn(self._batchPredictFromPhasesAmplitudes(self.phases_v, self.amplitudes_v))
-        else:
+    def data_fit_fn(self):
+        if self.reconstruction_type == 'displacement':
             return self.loss_fn(self._batchPredictFromDisplacementsAmplitudes(self.ux_uy_2d_v, self.amplitudes_v))
+        else:
+            return self.loss_fn(self._batchPredictFromPhasesAmplitudes(self.phases_v, self.amplitudes_v))
     
     def objective_fn(self):
         if self.displacement_tv_reg_const is not None:
-            return self.fit_fn() + self.tv_loss_fn()
-        return self.fit_fn()
+            return self.data_fit_fn() + self.tv_loss_fn()
+        return self.data_fit_fn()
+
+    def alternating_fit_fn(self):
+        ux_2d_t, uy_2d_t = self.getUxUy2d(self.ux_uy_2d_v)
+        uz_2d_t = tf.zeros_like(ux_2d_t)
+
+        phases_all_t = []
+        for H, K, L in self.sim.params.HKL_list:
+            t1 = H * ux_2d_t + K * uy_2d_t  +  L * uz_2d_t
+            phase_t = 2 * np.pi * t1
+            phases_all_t.append(phase_t)
+        phases_from_displacements = tf.stack(phases_all_t)
+        phases_unwrapped = tf.constant(self.getUnwrappedPhases())
+        return 0.5 * tf.reduce_sum(tf.abs(phases_from_displacements - phases_unwrapped)**2)
             
     @tf.function
     def adamMinimize(self, n_inner: tf.Tensor):
+        #if self.reconstruction_type == 'alternating':
+        #    raise ValueError("Cannot use adamMinimize function for alternating optimization")
+
         objective_array = tf.TensorArray(tf.float32, size=0,dynamic_size=True, clear_after_read=False)
         for i in range(n_inner):
             self.genNewBatch()
             
             #objective_fn = lambda: self.loss_fn(self._batch_predict_fn(self.ux_uy_2d_v, self.amplitudes_v))
             for key, opt in self.optimizers.items():
-                opt['optimizer'].minimize(self.objective_fn, opt['var'])
+                if self.reconstruction_type == 'alternating' and key == 'displacement':
+                    opt['optimizer'].minimize(self.alternating_fit_fn, opt['var'])
+                else:
+                    opt['optimizer'].minimize(self.objective_fn, opt['var'])
             
             objective = self.objective_fn()
             objective_array = objective_array.write(i, objective)
@@ -456,32 +489,38 @@ class ReconstructionT:
            
             self.loss_per_iter = np.concatenate((self.loss_per_iter, losses_stack.numpy()))
             self.iteration += check_frequency
-                                                
-            if self.reconstruct_phases_only:
-                amplitudes_2d_out, rho_out = self.getNumpyOutputs()
-            else:
-                amplitudes_2d_out, ux_out, uy_out, rho_out = self.getNumpyOutputs()
-            
+
+            outs = self.getNumpyOutputs()
+
             err_print_append = ""
-            if  not self.reconstruct_phases_only:
+            if  not self.reconstruction_type != 'phase':
                 pady0, padx0, nyvar, nxvar, nzvar = self.pady0, self.padx0, self.npix_y, self.npix_x, self.npix_z
             
                 ux_out[~(self.sim.sample.amplitudes_trunc_mask[pady0: pady0 + nyvar, padx0: padx0 + nxvar, nzvar//2])] = 0
                 uy_out[~(self.sim.sample.amplitudes_trunc_mask[pady0: pady0 + nyvar, padx0: padx0 + nxvar, nzvar//2])] = 0
 
-                rollx, errx, phasex = register_translation(self.ux_test, ux_out, upsample_factor=2)
-                rolly, erry, phasey = register_translation(self.uy_test, uy_out, upsample_factor=2)
+                rollx, errx, phasex = register_translation(self.ux_test, outs['ux'], upsample_factor=2)
+                rolly, erry, phasey = register_translation(self.uy_test, outs['uy'], upsample_factor=2)
                 err_print_append = f" err_ux {errx:4.3g} err_uy {erry:4.3g}"
             
             rho_err_print_append = "err_rho "
             for indx, rho_test in enumerate(self.rho_test):
-                rollr, errr, phaser = register_translation(rho_test, rho_out[indx], upsample_factor=10)
-                rollr, errr, phaser = register_translation(rho_test, rho_out[indx] * np.exp(1j * phaser), upsample_factor=10)
+                rollr, errr, phaser = register_translation(rho_test, outs['rho_2d_phase'], upsample_factor=10)
+                rollr, errr, phaser = register_translation(rho_test, outs['rho_2d_phase'] * np.exp(1j * phaser),
+                                                           upsample_factor=10)
                 
                 rho_err_print_append += f"{errr:4.3g} "
             
             itn, lossval = self.iteration.numpy(), self.loss_per_iter[-1]
             print(f"Iter {itn} floss {lossval:4.3g} " + rho_err_print_append + err_print_append)
-        
-        
+
+    def getUnwrappedPhases(self):
+        if not self.reconstruct_phases_only:
+            raise NotImplementedError("Unwrapping phases only works for the phase reconstruction procedure.")
+
+        phases = self.phases_v.numpy().reshape(-1, self.npix_y, self.npix_x)
+        phases_unwrapped = []
+        for p in phases:
+            phases_unwrapped.append(unwrap_phase(p))
+        return np.array(phases_unwrapped)
         
