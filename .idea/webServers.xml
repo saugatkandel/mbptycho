@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="4497b2e5-1a31-461d-ae21-f567f7bb9df8" name="xrm">
+        <fileTransfer rootFolder="/raid/home/skandel" accessType="SFTP" host="xrm.phys.northwestern.edu" port="22" sshConfigId="7d03efbe-1738-4674-8ae7-a2e748f7348a" sshConfig="skandel@xrm.phys.northwestern.edu:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

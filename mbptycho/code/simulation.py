@@ -12,10 +12,13 @@ class SimulationParams:
     wavelength: float =  1.377e-4 #microns, for 9 keV
     det_pix_size: float = 55 #microns, for Merlin
     det_dist = 0.35e6 # detector to sample distance
-    npix_det: int = 160 # square detector
+    npix_det: int = 150 # square detector
     HKL_list: List[int] = dt.field(default_factory=lambda: np.array([[1, 0, 0],
                                                                      [1, 1, 0],
                                                                      [1, 2, 0]]))
+    magnitudes_scaling_per_peak: List[int] = None
+    random_scaled_magnitudes: bool = True
+    magnitudes_max: float = 0.5
     n_scan_positions: int = 11
     npix_scan_shift: int = 4
     sample_pix_size: float = dt.field(init=False)
@@ -47,9 +50,12 @@ class SampleParams:
     grain_width = 0.8 # in microns, edge-to-edge distance in x (as mounted at HXN)
     grain_height = 0.5 # edge-to-edge distance in y
     film_thickness: float = 0.1 # in microns
+    npix_pad_x: int = 0
+    npix_pad_y: int = 0
     lattice: List[float] = dt.field(default_factory=lambda: np.array([0.0003905] * 3))
     strain_type: str = 'point_inclusion'
-    random_scaled_amplitudes: bool = True
+    random_scaled_magnitudes: bool = True
+    magnitudes_max: float = 1.0
 
 
 @dt.dataclass
@@ -74,7 +80,7 @@ class PartialEdgeDislocationStrainParams:
 @dt.dataclass
 class DisplacementFieldWaveStrainParams:
     wavelength: float = 0.05 # displacement field wavelength in microns
-    mag: float = 1e-3 # amplitude of the wave
+    mag: float = 1e-3 # magnitude of the wave
     orientation: float = dt.field(init=False) # random in plane orientation
     
 
@@ -84,8 +90,9 @@ class StephanStrainParams:
     
 
 def reloadSimulation(fname, 
-                     reload_sim=True, 
-                     reload_sample_only_filename:str=None, 
+                     reload_sim=True,
+                     reload_sample_only_filename:str=None,
+                     save_sample_only_filename:str=None,
                      new_sim_params:dict = None, 
                      new_extra_sample_params:dict = None):
 
@@ -101,7 +108,10 @@ def reloadSimulation(fname,
     if reload_sample_only_filename is not None:
         sim = Simulation(sim_params=new_sim_params, extra_sample_params=new_extra_sample_params, 
                          reload_sample_file=reload_sample_only_filename,
-                         save_sample_file=reload_sample_only_filename)
+                         save_sample_file=save_sample_only_filename)
+    elif save_sample_only_filename is not None:
+        sim = Simulation(sim_params=new_sim_params, extra_sample_params=new_extra_sample_params,
+                         save_sample_file=save_sample_only_filename)
     else:
         sim = Simulation(new_sim_params, new_extra_sample_params)
     print('Saving new simulation...')
@@ -127,9 +137,17 @@ class Sample:
                        self.params.sample_pix_size)
         
         self.YY_full, self.XX_full, self.ZZ_full = np.meshgrid(self.y_full, self.x_full, self.z_full, indexing='ij')
-        self.obj_mask_full = ((np.abs(self.YY_full) < (self.params.grain_height / 2))
-                         * (np.abs(self.XX_full) < (self.params.grain_width / 2)) 
-                         * (np.abs(self.ZZ_full) < (self.params.film_thickness / 2)))
+
+        y_pad = self.params.sample_pix_size * self.params.npix_pad_y
+        x_pad = self.params.sample_pix_size * self.params.npix_pad_x
+        #z_pad = self.params.sample_pix_size * self.params.npix_pad_z
+        print('pads', y_pad, x_pad)
+        self.obj_mask_full = ((np.abs(self.YY_full) < (self.params.grain_height / 2 + y_pad))
+                         * (np.abs(self.XX_full) < (self.params.grain_width / 2 + x_pad))
+                         * (np.abs(self.ZZ_full) < (self.params.film_thickness / 2 )))
+        self.obj_mask_full_no_pad = ((np.abs(self.YY_full) < (self.params.grain_height / 2))
+                                * (np.abs(self.XX_full) < (self.params.grain_width / 2))
+                                * (np.abs(self.ZZ_full) < (self.params.film_thickness / 2)))
         
         self.makeStrains(self.params.strain_type)
         self.truncateNumericalWindow(pad=2, xy_scan=True)
@@ -155,9 +173,9 @@ class Sample:
         # getting the random terminii
         coords_all = np.stack([self.YY_full, self.XX_full], axis=-1).reshape(-1, 2)
         
-        rp = np.random.randint(low=0, high=self.obj_mask_full.sum(),
+        rp = np.random.randint(low=0, high=self.obj_mask_full_no_pad.sum(),
                                size=self.strain_params.n_inclusion)
-        terminii = coords_all[self.obj_mask_full.flat, :][rp, :]
+        terminii = coords_all[self.obj_mask_full_no_pad.flat, :][rp, :]
         self.strain_params.coords_inclusion = terminii
         
         self.Ux_full = np.zeros_like(self.XX_full)
@@ -181,12 +199,12 @@ class Sample:
         # getting a random terminus
         coords_all = np.stack([self.YY_full, self.XX_full], axis=-1).reshape(-1, 2)
         
-        rp = np.random.randint(0, high=self.obj_mask_full.sum())
+        rp = np.random.randint(0, high=self.obj_mask_full_no_pad.sum())
         
-        terminus = coords_all[self.obj_mask_full.flat,:][rp,:]
+        terminus = coords_all[self.obj_mask_full_no_pad.flat,:][rp,:]
         self.strain_params.coord_terminus = terminus
         
-        print(rp, terminus)
+        #print(rp, terminus)
     
         # random in plane orientation for cdw
         theta = np.pi * (-1 + 2 * np.random.random())
@@ -203,7 +221,7 @@ class Sample:
         phi = np.arctan2(coords_rel @ unit_p, coords_rel @ unit)
         phi[phi < 0] = phi[phi < 0] + 2 * np.pi
         
-        print(phi.max(), phi.min())
+        #print(phi.max(), phi.min())
         
         mask1 = phi < np.pi / 2
         mask2 = (phi > np.pi / 2) * (phi < 3 * np.pi / 2)
@@ -214,9 +232,9 @@ class Sample:
         uy = (mask1 * np.sin(theta + np.pi / 2) + mask2 * np.sin(theta + phi) 
               + mask3 * np.sin(theta + 3 * np.pi / 2))
         
-        self.Ux_full = self.obj_mask_full * mag * np.reshape(ux, self.XX_full.shape)
-        self.Uy_full = self.obj_mask_full * mag * np.reshape(uy, self.YY_full.shape)
-        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full * np.sign(self.ZZ_full)
+        self.Ux_full = self.obj_mask_full_no_pad * mag * np.reshape(ux, self.XX_full.shape)
+        self.Uy_full = self.obj_mask_full_no_pad * mag * np.reshape(uy, self.YY_full.shape)
+        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full_no_pad * np.sign(self.ZZ_full)
         
     def _setStrain2(self):
         self.strain_params = DisplacementFieldWaveStrainParams()
@@ -241,25 +259,29 @@ class Sample:
         projection = (unit[None, :] @ pts).T
         
         U = np.reshape(mag * np.cos(np.pi * projection / self.strain_params.wavelength), self.XX_full.shape)
-        self.Ux_full = U * np.cos(theta) * self.obj_mask_full
-        self.Uy_full = U * np.sin(theta) * self.obj_mask_full
-        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full * np.sign(self.ZZ_full)        
+        self.Ux_full = U * np.cos(theta) * self.obj_mask_full_no_pad
+        self.Uy_full = U * np.sin(theta) * self.obj_mask_full_no_pad
+        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full_no_pad * np.sign(self.ZZ_full)
         
         
     def _setStephanStrain(self):
         
         # local lattice displacement in units of microns
-        self.Ux_full = self.params.strain_scaling_factor * (np.cos(self.XX_full) - 1) * self.obj_mask_full * np.sign(self.XX_full)
-        self.Uy_full = self.params.strain_scaling_factor * (np.cos(self.YY_full * 0.5) - 1) * self.obj_mask_full * np.sign(self.YY_full)
-        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full * np.sign(self.ZZ_full)
+        self.Ux_full = (self.params.strain_scaling_factor * (np.cos(self.XX_full) - 1) *
+                        self.obj_mask_full_no_pad * np.sign(self.XX_full))
+        self.Uy_full = (self.params.strain_scaling_factor * (np.cos(self.YY_full * 0.5) - 1) *
+                        self.obj_mask_full_no_pad * np.sign(self.YY_full))
+        self.Uz_full = np.zeros_like(self.ZZ_full) * self.obj_mask_full_no_pad * np.sign(self.ZZ_full)
     
-    def setSampleRhos(self, 
-                      random_scaled_amplitudes: bool = True,
+    def setSampleRhos(self,
                       hole_center: List[int] = np.array([0,0,0]),
                       HKL_list: List[int] = np.array([[1, 0, 0],
                                                       [1, 1, 0],
-                                                      [1, 2, 0]])):
-        """Calculate the amplitude and phase profile using the provided amplitudes and HKL list. 
+                                                      [1, 2, 0]]),
+                      magnitudes_scaling_per_peak: List[float] = None,
+                      random_scaled_magnitudes: bool = True,
+                      magnitudes_max: float = 1.0):
+        """Calculate the magnitude and phase profile using the provided magnitudes and HKL list. 
         
         Sets the rhos for the sample class, and also returns the rhos.
         
@@ -267,38 +289,40 @@ class Sample:
         ----------
         HKL_list: array_like(int)
             Should be in the format [[H1, K1, L1], [H2, K2, L2]] where [H1, K1, L1] is a bragg peak.
-        amplitude_const: float
-            Assuming a constant amplitude throughout the sample, for all incoming wavelengths.
+        magnitude_const: float
+            Assuming a constant magnitude throughout the sample, for all incoming wavelengths.
         Returns
         -------
         rhos: array(float)
             Containing the rho profile for each of the supplied bragg peaks.
         """
         
-        amplitudes = np.ones(self.YY_trunc.shape)
-        
-        if self.params.strain_type == '1':
+        magnitudes = np.ones(self.YY_trunc.shape)
+
+        if self.params.strain_type == '1':# or self.params.strain_type=='point_inclusion':
             for terminus in self.strain_params.coords_inclusion:
                 radius_sq = (self.YY_trunc - terminus[0])**2 + (self.XX_trunc - terminus[1])**2
                 mask = radius_sq > (self.strain_params.inclusion_radius * self.params.sample_pix_size)**2
-                amplitudes *= mask
-        
-        if self.params.random_scaled_amplitudes: 
-            scaling_per_peak = np.random.random_sample(HKL_list.shape[0]) * 0.4 + 0.1 # getting values between 0.1 and 0.5
-        else:
-            scaling_per_peak = np.ones(HKL_list.shape[0])
+                magnitudes *= mask
 
-        
+        if magnitudes_scaling_per_peak is not None:
+            print("Magnitude scaling per peak is supplied. Does not apply random scaling.")
+            scaling_per_peak = np.array(magnitudes_scaling_per_peak)
+        elif random_scaled_magnitudes:
+            scaling_per_peak = (np.random.random_sample(HKL_list.shape[0])) * magnitudes_max
+        else:
+            scaling_per_peak = np.ones(HKL_list.shape[0]) * magnitudes_max
+
         # make phases by doing dot products with Q vectors
         displacements = np.array([self.Ux_trunc, self.Uy_trunc, self.Uz_trunc]).reshape(3, -1) 
         dot_prod = HKL_list @ (displacements / self.params.lattice[:,None])
         
         phase_term = np.exp(1j * 2 * np.pi * dot_prod).reshape(-1, *self.Ux_trunc.shape)
-        rhos = scaling_per_peak[:,None,None,None] * amplitudes[None, ...] * phase_term
-        self.rhos = rhos * self.obj_mask_trunc
-        self.amplitudes_trunc_mask = amplitudes.astype('bool')
+        rhos = scaling_per_peak[:,None,None,None] * magnitudes[None, ...] * phase_term
+        self.rhos = rhos * self.obj_mask_trunc_no_pad
+        self.magnitudes_trunc_mask = magnitudes.astype('bool')
 
-        return rhos
+        return self.rhos
     
     def truncateNumericalWindow(self, pad=2, xy_scan=True) -> np.ndarray:
         """Once we define the ptychographic scan positions, and if we have prior knowledge about the size of the
@@ -340,6 +364,7 @@ class Sample:
         self.Uy_trunc = self.Uy_full[:, :, self.nw_zmin: self.nw_zmax]
         self.Uz_trunc = self.Uz_full[:, :, self.nw_zmin: self.nw_zmax]
         self.obj_mask_trunc = self.obj_mask_full[:, :, self.nw_zmin: self.nw_zmax]
+        self.obj_mask_trunc_no_pad = self.obj_mask_full_no_pad[:, :, self.nw_zmin: self.nw_zmax]
         
         self.x_trunc = self.x_full
         self.y_trunc = self.y_full
@@ -374,6 +399,10 @@ class Probes:
                 probes_selected.append(probes_all[1])
             elif (H == 1 and K == 2 and L == 0):
                 probes_selected.append(probes_all[2])
+            elif (H==2 and K==1 and L==0):
+                probes_selected.append(probes_all[3])
+            elif (H==3 and K==1 and L==0):
+                probes_selected.append(probes_all[4])
             else:
                 raise NotImplementedError("not implemented")
         self.probes = probes_selected
@@ -464,7 +493,7 @@ class SimulationPerBraggPeak:
         self.nw_rotated_masked_coords = self.nw_rotated_coords_stacked.T[self.nw_rotation_mask].T
         self.nw_rotation_mask_indices = np.where(self.nw_rotation_mask)[0]
         
-        # Saving all of this information for use in the reconstruction routine.
+        # Saving all of this information for use in the recons routine.
         [
             self.diffraction_patterns,
             self.rho_slices,
@@ -661,13 +690,14 @@ class SimulationPerBraggPeak:
             proj_cx1 = centerx + self.npix_det // 2
             proj_slice = np.s_[proj_cy0:proj_cy1, proj_cx0:proj_cx1]
             projection = projection[proj_slice]
+            #print(centery, centerx, proj_cy0, proj_cy1, proj_cx0, proj_cx1)
 
             rho_slices.append(rho_slice)
             probe_slices.append(probe_slice)
             projection_slices.append(proj_slice)
             
             ft = np.fft.fft2(projection)
-            diffraction_patterns.append(np.abs(ft))
+            diffraction_patterns.append(np.abs(ft)**2)
         diffraction_patterns = np.array(diffraction_patterns)
         if poisson_noise:
             print("Adding poisson noise...")
@@ -687,7 +717,7 @@ class Simulation:
         
         
         if reload_sample_file is not None:
-            print("Reloading sample from provided filen...")
+            print(f"Reloading sample from provided file... {reload_sample_file}")
             if os.path.exists(reload_sample_file):
                 with open(reload_sample_file, 'rb') as f:
                     sample = dill.load(f)
@@ -700,14 +730,21 @@ class Simulation:
                     self.sample = sample
             else:
                 print("Supplied sample file does not exist.")
+
         if not hasattr(self, "sample"):
             print('Creating new sample...')
             self.sample = Sample(wavelength=self.params.wavelength, sample_pix_size=self.params.sample_pix_size, sample_params=extra_sample_params)
+
             if save_sample_file is not None:
+                print(f"Saving sample file.. {save_sample_file}")
                 with open(save_sample_file, 'wb') as f:
                     dill.dump(self.sample, f)
         
-        self.rhos = self.sample.setSampleRhos(HKL_list=self.params.HKL_list)
+        self.rhos = self.sample.setSampleRhos(
+            HKL_list=self.params.HKL_list,
+            magnitudes_scaling_per_peak=self.params.magnitudes_scaling_per_peak,
+            random_scaled_magnitudes=self.params.random_scaled_magnitudes,
+            magnitudes_max=self.params.magnitudes_max)
         
         self.probes_obj = Probes(self.params.HKL_list, self.params.probes_matlab_file)
         self.probes = [p[:,:,self.sample.nw_zmin:self.sample.nw_zmax] for p in self.probes_obj.probes]
