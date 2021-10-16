@@ -11,7 +11,9 @@ from mbptycho.code.recons.base import  BaseReconstructionT
 
 class DisplacementFromPhaseReconstruction(BaseReconstructionT):
     def __init__(self, simulation, phases_init,
-                 log_frequency=1):
+                 log_frequency=1,
+                 gpu:str = '/gpu:0'):
+        self._gpu = gpu
         self.sim = simulation
 
         self._model_type = 'displacement_to_phase'
@@ -275,7 +277,9 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
                  batch_size: int = 50,
                  background_level: float = 1e-8,
                  n_validation: int = 0,
-                 log_frequency=1):
+                 log_frequency: int =1,
+                 gpu:str = '/gpu:0'):
+        self._gpu = gpu
         self.sim = simulation
         self.batch_size = batch_size
 
@@ -426,7 +430,9 @@ class DisplacementProjectedReconstruction(BaseReconstructionT):
                  batch_size: int = 50,
                  background_level: float = 1e-8,
                  n_validation: int = 0,
-                 log_frequency=1):
+                 log_frequency=1,
+                 gpu='/gpu:0'):
+        self._gpu = gpu
         self.sim = simulation
         self.batch_size = batch_size
 

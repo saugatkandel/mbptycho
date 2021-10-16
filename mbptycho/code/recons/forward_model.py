@@ -11,12 +11,13 @@ import tensorflow_probability as tfp
 class MultiReflectionBraggPtychoFwdModel(abc.ABC):
 
     @abc.abstractmethod
-    def __init__(self, sim: Simulation):
+    def __init__(self, sim: Simulation, gpu:str = '/gpu:0'):
         self._sim = sim
         self.variables = {}
+        self._gpu = gpu
 
         self._setPixelsAndPads()
-        with tf.device('/gpu:0'):
+        with tf.device(self._gpu):
             self._coords_t = tf.constant(self._sim.simulations_per_peak[0].nw_coords_stacked, dtype='float32')
             self._setScanCoords()
 
@@ -25,8 +26,26 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
             self._setLocationIndices()
             self._setSliceIndices()
 
-            self._setPhaseDisplacementInversionMatrix()
+            #self._setPhaseDisplacementInversionMatrix()
 
+    def _setPixelsAndPads(self):
+        self._npix_y = np.sum(np.sum(self._sim.sample.obj_mask_w_delta, axis=(1, 2)) > 0)
+        self._npix_x = np.sum(np.sum(self._sim.sample.obj_mask_w_delta, axis=(0, 2)) > 0)
+        self._npix_z = np.sum(np.sum(self._sim.sample.obj_mask_w_delta, axis=(0, 1)) > 0)
+
+        self._npix_xy = self._npix_x * self._npix_y
+
+        self._nyr, self._nxr, self._nzr = self._sim.rhos[0].shape
+        self._pady0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(1, 2)))[0][0]
+        self._padx0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(0, 2)))[0][0]
+        self._padz0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(0, 1)))[0][0]
+        
+        self._npix_det = self._sim.params.npix_det
+        # projection slice based on number of pixels in the detector
+        npix_diffy = (self._nyr - self._npix_det) // 2
+        npix_diffx = (self._nxr - self._npix_det) // 2
+        self._proj_slice = np.s_[npix_diffy: self._nyr - npix_diffy, npix_diffx: self._nxr - npix_diffx]
+    
     def _setScanCoords(self):
 
         if hasattr(self._sim.simulations_per_peak[0], "ptycho_scan_positions"):
@@ -38,39 +57,42 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
                                                              axis=0),
                                               dtype='int32')
         else:
-            raise
+            raise NotImplementedError
             self._has_scan_coords_per_peak = False
             self._scan_coords_t = tf.constant(self._sim.ptycho_scan_positions, dtype='int32')
-
-
+    
     def _addMagnitudeVariable(self, magnitudes_init=None, magnitude_log_constraint_fn=None):
         if self._shared_magnitudes:
             size = self._npix_xy + self._sim.params.HKL_list.shape[0] - 1
         else:
             size = self._npix_xy * self._sim.params.HKL_list.shape[0]
-
+            
         if magnitudes_init is None:
-            magnitudes_init = np.zeros(size, dtype='float32')
+            if self._shared_magnitudes:
+                log_xy = tf.fill(self._npix_xy, tf.math.log(1e-7))
+                log_scaling = tf.zeros(self._sim.params.HKL_list.shape[0] - 1, dtype='float32')
+                magnitudes_log_init = tf.concat((log_xy, log_scaling), axis=0)
+            else:
+                magnitudes_log_init = tf.fill(size, tf.math.log(1e-7))
         else:
             if magnitudes_init.size != size:
                 raise ValueError("magnitude initialization supplied is not valid")
+            magnitudes_log_init = tf.math.log(magnitudes_init.astype('float32') + 1e-7)
 
-        magnitudes_init_logs = np.log(magnitudes_init + 1e-7)
-        #magnitudes_init_logs = magnitudes_init
-        with tf.device('/gpu:0'):
-            self.magnitudes_log_v = tf.Variable(magnitudes_init_logs,
+        with tf.device(self._gpu):
+            self.magnitudes_log_v = tf.Variable(magnitudes_log_init,
                                            constraint=magnitude_log_constraint_fn,
                                            dtype='float32',
                                            name='magnitudes_log_v')
         self.variables['magnitudes_log_v'] =  self.magnitudes_log_v
-
+        
     def _addDisplacementVariable(self, ux_uy_init=None):
         if ux_uy_init is None:
             ux_uy_init = np.ones(self._npix_xy * 2)
         else:
             if len(ux_uy_init.shape) != 1:
                 raise ValueError("Supply a flat 1d array for the initialization.")
-        with tf.device('/gpu:0'):
+        with tf.device(self._gpu):
             self.ux_uy_2d_v = tf.Variable(ux_uy_init, dtype='float32', name='ux_uy')
         self.variables['ux_uy_2d_v'] = self.ux_uy_2d_v
 
@@ -79,99 +101,62 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         if phases_init is None:
             phases_init = np.zeros(self._npix_xy * self._sim.params.HKL_list.shape[0])
 
-        with tf.device('/gpu:0'):
+        with tf.device(self._gpu):
             self.phases_v = tf.Variable(phases_init, dtype='float32', name='phases')
         self.variables['phases'] = self.phases_v
-
-
-
-    def _setPixelsAndPads(self):
-        self._npix_x = np.sum(np.sum(self._sim.sample.obj_mask_trunc, axis=(0, 2)) > 0)
-        self._npix_y = np.sum(np.sum(self._sim.sample.obj_mask_trunc, axis=(1, 2)) > 0)
-        self._npix_z = np.sum(np.sum(self._sim.sample.obj_mask_trunc, axis=(0, 1)) > 0)
-
-        self._npix_xy = self._npix_x * self._npix_y
-
-        self._nyr, self._nxr, self._nzr = self._sim.rhos[0].shape
-        self._pady0 = np.where(self._sim.sample.obj_mask_trunc.sum(axis=(1, 2)))[0][0]
-        self._padx0 = np.where(self._sim.sample.obj_mask_trunc.sum(axis=(0, 2)))[0][0]
-        self._padz0 = np.where(self._sim.sample.obj_mask_trunc.sum(axis=(0, 1)))[0][0]
-
+    
     def _setInterpolationLimits(self):
         # These arrays indicate the limits of the interpolation before the bragg projection.
-        self._interp_x_ref_min_t = tf.constant([self._sim.sample.y_trunc[0],
-                                                self._sim.sample.x_trunc[0],
-                                                self._sim.sample.z_trunc[0]], dtype='float32')
-        self._interp_x_ref_max_t = tf.constant([self._sim.sample.y_trunc[-1],
-                                                self._sim.sample.x_trunc[-1],
-                                                self._sim.sample.z_trunc[-1]], dtype='float32')
+        self._interp_x_ref_min_t = tf.constant([self._sim.sample.y_full[0],
+                                                self._sim.sample.x_full[0],
+                                                self._sim.sample.z_full[0]], dtype='float32')
+        self._interp_x_ref_max_t = tf.constant([self._sim.sample.y_full[-1],
+                                                self._sim.sample.x_full[-1],
+                                                self._sim.sample.z_full[-1]], dtype='float32')
 
 
     def _setProbesAndMasks(self):
-        # This is a workaround bc the different arrays for the different siulations might not necessarily
-        # have the same number of elements. Tensorflow doesn't handle that well.
-        # ------------------------------------------------------------------------------------------------
-        # Since I have truncated probe structures for efficiency reasons, they are not of the same 3d shape
-        # for the different bragg peaks.
-        self.probes_all_t = tf.constant(np.concatenate([s.probe.flatten() for s in
-                                                        self._sim.simulations_per_peak]),
-                                        dtype='complex64')
+
+        self.probes_all_t = tf.constant([s.probe for s in self._sim.simulations_per_peak], dtype='complex64')
 
         # After rotation (for the final projection), we can speed up the interpolation by only selecting
         # the rotated coordinates that lie within the unrotated object box.
         # The number of coordinates to interpolate can vary per bragg peak.
-        self._coords_rotated_masked_t = tf.constant(np.concatenate([s.nw_rotated_masked_coords.T.flatten()
+        self._coords_rotated_masked_t = tf.constant(np.concatenate([s.nw_rotated_masked_delta_coords.T.flatten()
                                                                     for s in self._sim.simulations_per_peak]),
                                                     dtype='float32')
-        self._rotation_mask_indices_t = tf.constant(np.concatenate([s.nw_rotation_mask_indices.flatten()
+        self._rotation_mask_indices_t = tf.constant(np.concatenate([s.nw_rotation_mask_delta_indices.flatten()
                                                                     for s in self._sim.simulations_per_peak]),
                                                     dtype='int32')
-
+    
     def _setLocationIndices(self):
-        # These contain information about how to select the appropriate probe, etc.
-        probes_iloc_all = []
-        coords_iloc_all = []
+        # These contain information about how to select the appropriate masked coordinates.
         rotix_iloc_all = []
+        coords_iloc_all = []
         for i, sim_per_peak in enumerate(self._sim.simulations_per_peak):
             if i == 0:
                 s1 = 0
                 s2 = 0
-                s3 = 0
             else:
-                s1 = probes_iloc_all[i - 1][0] + probes_iloc_all[i - 1][1]
-                s2 = coords_iloc_all[i - 1][0] + coords_iloc_all[i - 1][1]
-                s3 = rotix_iloc_all[i - 1][0] + rotix_iloc_all[i - 1][1]
-            probes_iloc_all.append([s1, sim_per_peak.probe.size, *sim_per_peak.probe.shape])
-            coords_iloc_all.append([s2, sim_per_peak.nw_rotated_masked_coords.T.size,
-                                    *sim_per_peak.nw_rotated_masked_coords.T.shape])
-            rotix_iloc_all.append([s3, sim_per_peak.nw_rotation_mask_indices.size,
-                                   *sim_per_peak.nw_rotation_mask_indices.shape])
-        self._probes_iloc_t = tf.constant(probes_iloc_all, dtype='int32')
-        self._coords_iloc_t = tf.constant(coords_iloc_all, dtype='int32')
+                s1 = coords_iloc_all[i - 1][0] + coords_iloc_all[i - 1][1]
+                s2 = rotix_iloc_all[i - 1][0] + rotix_iloc_all[i - 1][1]
+            coords_iloc_all.append([s1, sim_per_peak.nw_rotated_masked_delta_coords.T.size,
+                                    *sim_per_peak.nw_rotated_masked_delta_coords.T.shape])
+            rotix_iloc_all.append([s2, sim_per_peak.nw_rotation_mask_delta_indices.size,
+                                   *sim_per_peak.nw_rotation_mask_delta_indices.shape])
         self._rotix_iloc_t = tf.constant(rotix_iloc_all, dtype='int32')
+        self._coords_iloc_t = tf.constant(coords_iloc_all, dtype='int32')
 
     def _setSliceIndices(self):
 
         # A lot of this slicing and dicing is aimed at avoiding expensive "roll" operations.
-        # I am reusing indices computed during the forward simulation for the recons as well.
-        self._scan_rho_slice_indices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.rho_slices)
-                                                      for s in self._sim.simulations_per_peak], dtype='int32')
-        self._scan_probe_slice_indices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.probe_slices)
-                                                        for s in self._sim.simulations_per_peak], dtype='int32')
-        self._scan_proj_slice_indices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.proj_slices)
-                                                       for s in self._sim.simulations_per_peak], dtype='int32')
-
-    def _setPhaseDisplacementInversionMatrix(self):
-        """To solve an overdetermined linear system Ax = b, we can use the relation:
-        x = (A^T A)^(-1) A^T b.
-
-        This function calculates and stores the matrix (A^T A)^(-1) A^T  for the unwrapped phases -> displacement
-        transformation.
-        """
-        hkl_matrix = np.array(self._sim.params.HKL_list)[:, :2]  # Ignoring the z components
-        inversion_matrix = np.linalg.inv(hkl_matrix.T @ hkl_matrix) @ hkl_matrix.T / (2 * np.pi)
-        self._displacement_invert_matrix_t = tf.constant(inversion_matrix, dtype='float32')
-
+        # I am reusing indices computed during the forward simulation fPor the recons as well.
+        #self._scan_probe_pads_t = tf.constant([s.probe_pads for s in self._sim.simulations_per_peak], dtype='int32')
+        #self._scan_probe_slice_indices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.probe_slices)
+        #                                                for s in self._sim.simulations_per_peak], dtype='int32')
+        self._scan_probe_pads = [s.probe_pads for s in self._sim.simulations_per_peak]
+        self._scan_probe_slices = [s.probe_slices for s in self._sim.simulations_per_peak]
+        
     @staticmethod
     def _getStartStopIndicesFromSliceList(slice_list):
         indices_list = []
@@ -182,7 +167,19 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
             sx2 = slice_x.stop
             indices_list.append([sy1, sy2, sx1, sx2])
         return indices_list
+    
+    def _setPhaseDisplacementInversionMatrix(self):
+        """To solve an overdetermined linear system Ax = b, we can use the relation:
+        x = (A^T A)^(-1) A^T b.
 
+        This function calculates and stores the matrix (A^T A)^(-1) A^T  for the unwrapped phases -> displacement
+        transformation.
+        """
+        hkl_matrix = np.array(self._sim.params.HKL_list)[:, :2]  # Ignoring the z components
+        inversion_matrix = np.linalg.inv(hkl_matrix.T @ hkl_matrix) @ hkl_matrix.T / (2 * np.pi)
+        self._displacement_invert_matrix_t = tf.constant(inversion_matrix, dtype='float32')
+    
+    
     def getMagnitudes2d(self, magnitudes_log_v):
         if self._shared_magnitudes:
             mags_log_2d_profile = tf.reshape(magnitudes_log_v[:self._npix_xy], (self._npix_y, self._npix_x))
@@ -302,45 +299,36 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         pcx = scan_coord_t[1]
 
         # again, a lot the the slicing and dicing
-        rho_slice = self._scan_rho_slice_indices_t[bragg_index, scan_coord_index]
-        proj_slice = self._scan_proj_slice_indices_t[bragg_index, scan_coord_index]
-        probe_slice = self._scan_probe_slice_indices_t[bragg_index, scan_coord_index]
+        probe_pad = self._scan_probe_pads[bragg_index][scan_coord_index]
+        probe_slice = self._scan_probe_slices[bragg_index][scan_coord_index]
 
-        iloc1 = self._probes_iloc_t[bragg_index]
         # Slicing and reshaping to get the probe
-        probe_this = tf.reshape(self.probes_all_t[iloc1[0]: iloc1[0] + iloc1[1]], iloc1[2:])
-
-        iloc2 = self._coords_iloc_t[bragg_index]
+        probe_this = self.probes_all_t[bragg_index]
+        probe_this = tf.pad(probe_this, probe_pad, mode='constant')[probe_slice]
+        
+        
+        iloc1 = self._coords_iloc_t[bragg_index]
         # getting the coordinates that we want to interpolate at.
-        coords_rotated_masked_this = tf.reshape(self._coords_rotated_masked_t[iloc2[0]: iloc2[0] + iloc2[1]],
-                                                iloc2[2:])
+        coords_rotated_masked_this = tf.reshape(self._coords_rotated_masked_t[iloc1[0]: iloc1[0] + iloc1[1]], iloc1[2:])
 
-        iloc3 = self._rotix_iloc_t[bragg_index]
-        rotation_mask_indices_this = tf.reshape(self._rotation_mask_indices_t[iloc3[0]: iloc3[0] + iloc3[1]],
-                                                iloc3[2:])[:, None]
+        iloc2 = self._rotix_iloc_t[bragg_index]
+        rotation_mask_indices_this = tf.reshape(self._rotation_mask_indices_t[iloc2[0]: iloc2[0] + iloc2[1]], iloc2[2:])[:, None]
 
         # Getting the slice of the object numerical window that the probe interacts with and calculating
         # the interaction.
         rho_this = rho_3d_bordered_all_t[bragg_index]
-        field_view_t = (rho_this[rho_slice[0]: rho_slice[1], rho_slice[2]:rho_slice[3]]
-                        * probe_this[probe_slice[0]: probe_slice[1], probe_slice[2]: probe_slice[3]])
-
-        # setting the field everywhere else to 0.
-        field_view_padded_t = tf.pad(field_view_t, [[rho_slice[0], 200 - rho_slice[1]],
-                                                    [rho_slice[2], 200 - rho_slice[3]],
-                                                    [0, 0]],
-                                     mode='constant')
+        field_view_t = rho_this * probe_this
 
         # iinterpolation for the rotated coordinates that lie within the unrotated object.
         rot_field_reals_t = tfp.math.batch_interp_regular_nd_grid(x=coords_rotated_masked_this,
                                                                   x_ref_min=self._interp_x_ref_min_t,
                                                                   x_ref_max=self._interp_x_ref_max_t,
-                                                                  y_ref=tf.math.real(field_view_padded_t),
+                                                                  y_ref=tf.math.real(field_view_t),
                                                                   axis=0, fill_value=0)
         rot_field_imag_t = tfp.math.batch_interp_regular_nd_grid(x=coords_rotated_masked_this,
                                                                  x_ref_min=self._interp_x_ref_min_t,
                                                                  x_ref_max=self._interp_x_ref_max_t,
-                                                                 y_ref=tf.math.imag(field_view_padded_t),
+                                                                 y_ref=tf.math.imag(field_view_t),
                                                                  axis=0, fill_value=0)
 
         # since we only interpolate a small selection of the rotated coordinates, we need to
@@ -357,8 +345,8 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
 
         # Project along the (rotated) z direction to get the exit wave.
         projection_t = tf.reduce_sum(field_rotated_t, axis=2)
-        projection_t = projection_t[proj_slice[0]:proj_slice[1], proj_slice[2]:proj_slice[3]]
-        proj_ft_t = tf.signal.fft2d(projection_t)
+        projection_sliced_t = projection_t[self._proj_slice]
+        proj_ft_t = tf.signal.fft2d(projection_sliced_t) / self._npix_det
         out_t = tf.abs(proj_ft_t)
         return out_t
 
@@ -441,6 +429,7 @@ class DisplacementFullForwardModel(MultiReflectionBraggPtychoFwdModel):
 
         # Getting the predicted diffraction data. Using a map is faster than a for loop.
         proj_map_fn = lambda indx: self._getProjFtT(rho_3d_bordered_all_t, indx)
+        print(batch_input_v)
         batch_predictions_t = tf.map_fn(proj_map_fn,
                                         batch_input_v, dtype=tf.float32)
                                        # fn_output_signature=[])

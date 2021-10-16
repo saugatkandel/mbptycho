@@ -6,7 +6,7 @@ from functools import partial
 #import sys
 #sys.path.append('../')
 
-from skimage.feature import register_translation
+from skimage.registration import phase_cross_correlation
 from skimage.restoration import unwrap_phase
 
 import tensorflow_probability as tfp
@@ -31,10 +31,13 @@ class BaseReconstructionT(abc.ABC):
                  phases_init: np.ndarray = None,
                  ux_uy_2d_init: np.ndarray = None,
                  background_level: float = 1e-8,
-                 n_validation:int =0):
+                 n_validation:int =0,
+                 gpu: str = '/gpu:0'):
+        self._gpu = gpu
+        
         self.sim = simulation
         self.batch_size = batch_size
-
+        
         self.background_level = background_level
 
         self._model_type = model_type
@@ -132,15 +135,15 @@ class BaseReconstructionT(abc.ABC):
                                               self.fwd_model._npix_x,
                                               self.fwd_model._npix_z]
 
-        ux_true = self.sim.sample.Ux_trunc[..., nzvar // 2].copy()
-        ux_true[~self.sim.sample.magnitudes_trunc_mask[..., nzvar // 2]] = 0
+        ux_true = self.sim.sample.Ux_full[..., nzvar // 2].copy()
+        ux_true[~self.sim.sample.obj_mask_w_delta[..., nzvar // 2]] = 0
         ux_true = ux_true[pady0: pady0 + nyvar, padx0: padx0 + nxvar] / self.sim.sample.params.lattice[0]
         self._ux_true = ux_true #- ux_true.mean()
 
-        uy_true = self.sim.sample.Uy_trunc[..., nzvar // 2].copy()
-        uy_true[~self.sim.sample.magnitudes_trunc_mask[..., nzvar // 2]] = 0
+        uy_true = self.sim.sample.Uy_full[..., nzvar // 2].copy()
+        uy_true[~self.sim.sample.obj_mask_w_delta[..., nzvar // 2]] = 0
         uy_true = uy_true[pady0: pady0 + nyvar, padx0: padx0 + nxvar] / self.sim.sample.params.lattice[0]
-        self._uy_true = uy_true # - uy_true.mean()
+        self._uy_true = uy_true #- uy_true.mean()
 
         self._rho_true = self.sim.sample.rhos[:, pady0: pady0 + nyvar, padx0: padx0 + nxvar, nzvar // 2]
         #pady1, padx1 = [self.sim.sample.params.npix_pad_y, self.sim.sample.params.npix_pad_x]
@@ -161,7 +164,7 @@ class BaseReconstructionT(abc.ABC):
         dataset = dataset.repeat()
 
         dataset_batch = dataset.batch(self.batch_size, drop_remainder=True)
-        dataset_batch = dataset_batch.apply(tf.data.experimental.prefetch_to_device('/gpu:0', 2))
+        dataset_batch = dataset_batch.apply(tf.data.experimental.prefetch_to_device(self._gpu, 2))
 
         iterator = iter(dataset_batch)
         return iterator
@@ -188,7 +191,7 @@ class BaseReconstructionT(abc.ABC):
         # I am using an extra variable here to ensure that the minibatch is only updated exactly when
         # I want.
         # This variable is not an optimization variable.
-        with tf.device("/gpu:0"):
+        with tf.device(self._gpu):
             self._batch_train_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
             if self._n_validation_diffs > 0:
                 self._batch_validation_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
@@ -342,8 +345,11 @@ class BaseReconstructionT(abc.ABC):
         pass
 
     def _get2DFilmOnly(self, input_2d):
-        pady1, padx1 = [self.sim.sample.params.npix_pad_y, self.sim.sample.params.npix_pad_x]
-        output_2d = input_2d[pady1: -pady1, padx1: -padx1]
+        pady1, padx1 = [self.sim.sample.params.npix_delta_y,
+                        self.sim.sample.params.npix_delta_x]
+        # this gives errors when pady1 or padx1 is 0.
+        #output_2d = input_2d[pady1: -pady1, padx1: -padx1]
+        output_2d = input_2d[pady1: input_2d.shape[0] - pady1, padx1: input_2d.shape[1] - padx1]
         return output_2d
 
     def _getRegistrationErrors(self, test, true, film_only=False, subtract_mean=False):
@@ -356,8 +362,8 @@ class BaseReconstructionT(abc.ABC):
             test = test - test.mean()
             true = true - true.mean()
 
-        roll, err, phase = register_translation(true, test, upsample_factor=10)
-        roll, err, phase = register_translation(true, test * np.exp(1j * phase), upsample_factor=10)
+        roll, err, phase = phase_cross_correlation(true, test, upsample_factor=10)
+        roll, err, phase = phase_cross_correlation(true, test * np.exp(1j * phase), upsample_factor=10)
         return err
 
     def _getRegistrationErrorDisp(self, u_test, u_true, film_only=False):
@@ -375,6 +381,7 @@ class BaseReconstructionT(abc.ABC):
         return False
 
     def finalizeInit(self):
+        print("Initializing the datalog...")
         self.datalog.finalize()
         self._finalized = True
 
