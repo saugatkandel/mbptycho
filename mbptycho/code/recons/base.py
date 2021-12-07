@@ -31,9 +31,9 @@ class BaseReconstructionT(abc.ABC):
                  phases_init: np.ndarray = None,
                  ux_uy_2d_init: np.ndarray = None,
                  background_level: float = 1e-8,
-                 n_validation:int =0,
-                 gpu: str = '/gpu:0'):
-        self._gpu = gpu
+                 n_validation:int =0):
+                 #gpu: str = '/gpu:0'):
+        #self._gpu = gpu
         
         self.sim = simulation
         self.batch_size = batch_size
@@ -129,23 +129,22 @@ class BaseReconstructionT(abc.ABC):
 
     def _setGroundTruths(self):
         # These are the true values. Used for comparison and validation.
-        pady0, padx0, nyvar, nxvar, nzvar = [self.fwd_model._pady0,
+        pady0, padx0, nyvar, nxvar = [self.fwd_model._pady0,
                                               self.fwd_model._padx0,
                                               self.fwd_model._npix_y,
-                                              self.fwd_model._npix_x,
-                                              self.fwd_model._npix_z]
-
-        ux_true = self.sim.sample.Ux_full[..., nzvar // 2].copy()
-        ux_true[~self.sim.sample.obj_mask_w_delta[..., nzvar // 2]] = 0
+                                              self.fwd_model._npix_x]
+        nz = self.sim.sample.params.npix_depth // 2
+        ux_true = self.sim.sample.Ux_full[..., nz].copy()
+        ux_true[~self.sim.sample.obj_mask_w_delta[..., nz]] = 0
         ux_true = ux_true[pady0: pady0 + nyvar, padx0: padx0 + nxvar] / self.sim.sample.params.lattice[0]
         self._ux_true = ux_true #- ux_true.mean()
 
-        uy_true = self.sim.sample.Uy_full[..., nzvar // 2].copy()
-        uy_true[~self.sim.sample.obj_mask_w_delta[..., nzvar // 2]] = 0
+        uy_true = self.sim.sample.Uy_full[..., nz].copy()
+        uy_true[~self.sim.sample.obj_mask_w_delta[..., nz]] = 0
         uy_true = uy_true[pady0: pady0 + nyvar, padx0: padx0 + nxvar] / self.sim.sample.params.lattice[0]
         self._uy_true = uy_true #- uy_true.mean()
 
-        self._rho_true = self.sim.sample.rhos[:, pady0: pady0 + nyvar, padx0: padx0 + nxvar, nzvar // 2]
+        self._rho_true = self.sim.sample.rhos[:, pady0: pady0 + nyvar, padx0: padx0 + nxvar, nz]
         #pady1, padx1 = [self.sim.sample.params.npix_pad_y, self.sim.sample.params.npix_pad_x]
         #self._ux_film_true = (self._ux_true[pady1: -pady1, padx1: -padx1]
         #                      - self._ux_true[pady1: -pady1, padx1: -padx1].mean())
@@ -164,7 +163,8 @@ class BaseReconstructionT(abc.ABC):
         dataset = dataset.repeat()
 
         dataset_batch = dataset.batch(self.batch_size, drop_remainder=True)
-        dataset_batch = dataset_batch.apply(tf.data.experimental.prefetch_to_device(self._gpu, 2))
+        dataset_batch = dataset_batch.prefetch(tf.data.AUTOTUNE)
+        #dataset_batch.apply(tf.data.Dataset.prefetch(tf.data.AUTOTUNE))#/experimental.prefetch_to_device(self._gpu, 2))
 
         iterator = iter(dataset_batch)
         return iterator
@@ -191,10 +191,10 @@ class BaseReconstructionT(abc.ABC):
         # I am using an extra variable here to ensure that the minibatch is only updated exactly when
         # I want.
         # This variable is not an optimization variable.
-        with tf.device(self._gpu):
-            self._batch_train_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
-            if self._n_validation_diffs > 0:
-                self._batch_validation_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
+        #with tf.device(self._gpu):
+        self._batch_train_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
+        if self._n_validation_diffs > 0:
+            self._batch_validation_input_v = tf.Variable(tf.zeros(self.batch_size, dtype=tf.int32), trainable=False)
 
     def _genNewTrainBatch(self):
         train_batch_indices = self._batch_train_input_v.assign(self._train_iterator.next())
@@ -353,7 +353,7 @@ class BaseReconstructionT(abc.ABC):
         return output_2d
 
     def _getRegistrationErrors(self, test, true, film_only=False, subtract_mean=False):
-
+        import matplotlib.pyplot as plt
         if film_only:
             test = self._get2DFilmOnly(test)
             true = self._get2DFilmOnly(true)
@@ -361,7 +361,7 @@ class BaseReconstructionT(abc.ABC):
         if subtract_mean:
             test = test - test.mean()
             true = true - true.mean()
-
+        
         roll, err, phase = phase_cross_correlation(true, test, upsample_factor=10)
         roll, err, phase = phase_cross_correlation(true, test * np.exp(1j * phase), upsample_factor=10)
         return err

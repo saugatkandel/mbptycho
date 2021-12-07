@@ -103,7 +103,8 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
                  background_level: float = 1e-8,
                  n_validation: int = 0,
                  log_frequency=1,
-                 unwrap_phase_proj:bool = False):
+                 unwrap_phase_proj:bool = False,
+                 gpu:str = '/gpu:0'):
         self.sim = simulation
         self.batch_size = batch_size
 
@@ -117,7 +118,8 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
                                 shared_magnitudes=shared_magnitudes,
                                 magnitudes_init=magnitudes_init,
                                 phases_init=phases_init,
-                                ux_uy_2d_init=ux_uy_2d_init)
+                                ux_uy_2d_init=ux_uy_2d_init,
+                                gpu=gpu)
 
         self._splitTrainingValidationData(n_validation, batch_size)
         self._createDataBatches()
@@ -291,7 +293,8 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
         self.attachForwardModel(self._model_type,
                                 shared_magnitudes=shared_magnitudes,
                                 magnitudes_init=magnitudes_init,
-                                phases_init=phases_init)
+                                phases_init=phases_init,
+                                gpu=gpu)
 
         self._splitTrainingValidationData(n_validation, batch_size)
         self._createDataBatches()
@@ -444,7 +447,8 @@ class DisplacementProjectedReconstruction(BaseReconstructionT):
         self.attachForwardModel(self._model_type,
                                 shared_magnitudes=shared_magnitudes,
                                 magnitudes_init=magnitudes_init,
-                                phases_init=phases_init)
+                                phases_init=phases_init,
+                                gpu=gpu)
 
         self._splitTrainingValidationData(n_validation, batch_size)
         self._createDataBatches()

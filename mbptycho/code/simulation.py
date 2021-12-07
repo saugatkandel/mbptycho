@@ -27,6 +27,7 @@ class SimulationParams:
     probes_matlab_h5_file: str = '~/code/mbptycho/experiments/matlab/datasets_0821/probes.h5'
     poisson_noise: bool = True
     poisson_noise_level: float = None  # not implemented yet
+    probe_abs_max: float = 728 # Reading this from the matlab data before normalization
 
     def __post_init__(self):
         # The starting voxelation could be anything really, as long as we are interpolating it to get the correct
@@ -58,8 +59,8 @@ class SampleParams:
     wavelength: float
     npix_xy: int = 200
     npix_depth: int = 100
-    grain_width = 0.8  # in microns, edge-to-edge distance in x (as mounted at HXN)
-    grain_height = 0.5  # edge-to-edge distance in y
+    grain_width: float = 0.8  # in microns, edge-to-edge distance in x (as mounted at HXN)
+    grain_height: float = 0.5  # edge-to-edge distance in y
     film_thickness: float = 0.1  # in microns
     npix_delta_x: int = 0  # this padding reflects the uncertainty about either size of the object.
     npix_delta_y: int = 0
@@ -99,6 +100,7 @@ class TwoEdgeSlipSystemStrainParams:
     lattice_constant: float = 1.0
     poisson_ratio: float = 0.29
     ratio: float = 0.25
+    name: str = "two_edge_slip"
 
 
 @dt.dataclass
@@ -196,7 +198,7 @@ class Sample:
             self._setStrain2()
         elif strain_type == 'point_inclusion':
             self._setStrainPointInclusion()
-        elif strain_type == 'two_edge_slip_system':
+        elif strain_type == 'two_edge_slip':
             self._setStrainTwoEdgeSlipSystem()
         else:
             raise ValueError()
@@ -226,25 +228,58 @@ class Sample:
             self.Uy_full += Uy_this
 
     def _setStrainTwoEdgeSlipSystem(self):
+        
         self.strain_params = TwoEdgeSlipSystemStrainParams()
 
         coords_all = np.stack([self.YY_full, self.XX_full], axis=-1).reshape(-1, 2)
         coords = coords_all[self.obj_mask_full.flat, :]
-
-        mn = np.min(np.max(coords, axis=0))
+        
+        mn = np.min(np.max(coords_all, axis=0))
         theta = np.pi * (-1 + 2 * np.random.rand())
-        endpoint = ratio * mn * np.array([0, -1])
+        
+        endpoint = self.strain_params.ratio * mn * np.array([0, -1])
 
-        print('mn', mn)
-        raise
+        u1 = self._rotatedEdgeDislocation(coords_all, endpoint, theta, 
+                                          self.strain_params.lattice_constant * self.params.lattice[0], 
+                                          self.strain_params.poisson_ratio)
+            
+        u2 = -self._rotatedEdgeDislocation(-coords_all, endpoint, theta, 
+                                           self.strain_params.lattice_constant * self.params.lattice[0],
+                                           self.strain_params.poisson_ratio)
+        u_full = u1 + u2
+        self.Uy_full = self.obj_mask_full * (u_full[:,0]).reshape(self.XX_full.shape)
+        self.Ux_full = self.obj_mask_full * (u_full[:,1]).reshape(self.XX_full.shape)
+        self.Uz_full = np.zeros_like(self.Ux_full)
+        return
 
-    def _rotatedEdgeDislocation(self, coords: np.array,
+
+    def _rotatedEdgeDislocation(self, coords_all: np.array,
                                 endpoint: np.array,
-                                theta: float,
-                                lattice_dist: float,
+                                th: float,
+                                lattice_const: float,
                                 poisson_ratio: float):
-        rotation = np.array([[np.cos(theta), -np.sin(theta)],
-                             np.sin(theta), np.cos(theta)])
+
+        # Flipping the axes from the matlab code.
+        rot1 = np.array([[np.cos(th), np.sin(th)], [-np.sin(th), np.cos(th)]]) # rotation theta
+        rot2 = np.array([[-np.sin(th), np.cos(th)], [-np.cos(th), -np.sin(th)]]) # rotation (theta + 90)
+        
+        # rotate grid passively
+        coords_rot = (rot2 @ (coords_all.T - (rot1.T @ endpoint[:,None]))).T
+
+        rads = np.sqrt(np.sum(coords_rot ** 2, axis=1))
+        th2 = np.arctan2(coords_rot[:, 0], coords_rot[:, 1])
+        
+        ux = (lattice_const / 2 / np.pi) * (th2 + np.sin( 2 * th2) / 4 / (1 - poisson_ratio))
+        uy = (lattice_const / 2 / np.pi) * ( -(1 - 2 * poisson_ratio) * 2 * np.log(rads / lattice_const) / 
+                                            (4 * (1 - poisson_ratio)) 
+                                            + (np.cos(2 * th2) - 1) / (4 * (1 - poisson_ratio)))
+        u_trans = np.array((uy, ux))
+        
+        # rotating back
+        u = rot1 @ u_trans
+        return u.T # the transpose is redundant, but I am using it for consistentcy with the other notation.
+
+
 
     def _setStrain3(self):
         self.strain_params = PartialEdgeDislocationStrainParams()
@@ -353,7 +388,6 @@ class Sample:
         #magnitudes = np.ones(self.YY_trunc.shape)
         magnitudes_full = np.ones(self.YY_full.shape)
 
-
         if self.params.strain_type == '1':
             for terminus in self.strain_params.coords_inclusion:
                 radius_sq = (self.YY_trunc - terminus[0]) ** 2 + (self.XX_trunc - terminus[1]) ** 2
@@ -385,7 +419,6 @@ class Sample:
         phase_term_full = np.exp(1j * 2 * np.pi * dot_prod_full).reshape(-1, *self.Ux_full.shape)
         rhos_full = scaling_per_peak[:, None, None, None] * magnitudes_full[None, ...] * phase_term_full
         self.rhos = rhos_full * self.obj_mask_full
-
         #self.magnitudes_trunc_mask = magnitudes.astype('bool')
         #print(np.abs(self.rhos).sum(), np.abs(self.rhos_full).sum())
         return self.rhos#, self.rhos_full
@@ -508,14 +541,15 @@ class Sample:
 
 
 class Probes:
-    def __init__(self, HKL_list: List, probes_h5_file: str):#probes_matlab_file: str):
+    def __init__(self, HKL_list: List, probes_h5_file: str, probe_abs_max: float = 1.0):#probes_matlab_file: str):
         #probes_all = self.loadFullBeamProfiles(probes_matlab_file)
-        probes_all = self.loadFullBeamProfilesFromH5(probes_h5_file)
+        self._probes_all = self.loadFullBeamProfilesFromH5(probes_h5_file)
+        self._probe_abs_max = probe_abs_max
         probes_selected = []
         for (H, K, L) in HKL_list:
             key_str = f'{H}{K}{L}'
-            if key_str in probes_all:
-                probes_selected.append(probes_all[key_str])
+            if key_str in self._probes_all:
+                probes_selected.append(self._probes_all[key_str] * probe_abs_max)
             else:
                 raise NotImplementedError("not implemented")
         self.probes = probes_selected
@@ -531,14 +565,14 @@ class Probes:
     def loadFullBeamProfilesFromH5(self, probes_h5_file):
         import h5py
         print("Loading probe from h5py file...")
-        f = h5py.File(probes_h5_file, 'r')
         probes_all = {}
-        for k in f.keys():
-            probe = f[k][0] + 1j * f[k][1]
-            # The tranpose op is for consistency with the probe loaded from .mat files.
-            # In the earlier versions of the code, I designed the wave propagation around
-            # the probe structure as stored in the .mat files. 
-            probes_all[k] = probe.T
+        with h5py.File(probes_h5_file, 'r') as f:
+            for k in f.keys():
+                probe = f[k][0] + 1j * f[k][1]
+                # The tranpose op is for consistency with the probe loaded from .mat files.
+                # In the earlier versions of the code, I designed the wave propagation around
+                # the probe structure as stored in the .mat files. 
+                probes_all[k] = probe.T
         print("Loading successfull...")
         return probes_all
 
@@ -857,6 +891,7 @@ class SimulationPerBraggPeak:
             diffraction_patterns = np.random.poisson(diffraction_patterns)
         #self.fields_before_rotation = np.array(fields_before_rotation, 'complex64')
         self.projection_slices_all = np.array(projection_slices_all, 'complex64')
+        self.fields_before_rotation = np.array(fields_before_rotation)
         return diffraction_patterns, projections_all# np.array(fields_before_rotation)
 
 
@@ -901,7 +936,7 @@ class Simulation:
             random_scaled_magnitudes=self.params.random_scaled_magnitudes,
             magnitudes_max=self.params.magnitudes_max)
 
-        self.probes_obj = Probes(self.params.HKL_list, self.params.probes_matlab_h5_file)
+        self.probes_obj = Probes(self.params.HKL_list, self.params.probes_matlab_h5_file, self.params.probe_abs_max)
         #self.probes = [p[:, :, self.sample.nw_zmin:self.sample.nw_zmax] for p in self.probes_obj.probes]
         self.probes = [p for p in self.probes_obj.probes]
         # theta, two_theta, gamma

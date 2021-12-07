@@ -11,22 +11,22 @@ import tensorflow_probability as tfp
 class MultiReflectionBraggPtychoFwdModel(abc.ABC):
 
     @abc.abstractmethod
-    def __init__(self, sim: Simulation, gpu:str = '/gpu:0'):
+    def __init__(self, sim: Simulation):#, /gpu:str = '/gpu:0'):
         self._sim = sim
         self.variables = {}
-        self._gpu = gpu
+        #self._gpu = gpu
 
         self._setPixelsAndPads()
-        with tf.device(self._gpu):
-            self._coords_t = tf.constant(self._sim.simulations_per_peak[0].nw_coords_stacked, dtype='float32')
-            self._setScanCoords()
+        #with tf.device(self._gpu):
+        self._coords_t = tf.constant(self._sim.simulations_per_peak[0].nw_coords_stacked, dtype='float32')
+        self._setScanCoords()
 
-            self._setInterpolationLimits()
-            self._setProbesAndMasks()
-            self._setLocationIndices()
-            self._setSliceIndices()
+        self._setInterpolationLimits()
+        self._setProbesAndMasks()
+        self._setLocationIndices()
+        self._setSliceIndices()
 
-            #self._setPhaseDisplacementInversionMatrix()
+        self._setPhaseDisplacementInversionMatrix()
 
     def _setPixelsAndPads(self):
         self._npix_y = np.sum(np.sum(self._sim.sample.obj_mask_w_delta, axis=(1, 2)) > 0)
@@ -79,11 +79,11 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
                 raise ValueError("magnitude initialization supplied is not valid")
             magnitudes_log_init = tf.math.log(magnitudes_init.astype('float32') + 1e-7)
 
-        with tf.device(self._gpu):
-            self.magnitudes_log_v = tf.Variable(magnitudes_log_init,
-                                           constraint=magnitude_log_constraint_fn,
-                                           dtype='float32',
-                                           name='magnitudes_log_v')
+        #with tf.device(self._gpu):
+        self.magnitudes_log_v = tf.Variable(magnitudes_log_init,
+                                        constraint=magnitude_log_constraint_fn,
+                                        dtype='float32',
+                                        name='magnitudes_log_v')
         self.variables['magnitudes_log_v'] =  self.magnitudes_log_v
         
     def _addDisplacementVariable(self, ux_uy_init=None):
@@ -92,8 +92,8 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         else:
             if len(ux_uy_init.shape) != 1:
                 raise ValueError("Supply a flat 1d array for the initialization.")
-        with tf.device(self._gpu):
-            self.ux_uy_2d_v = tf.Variable(ux_uy_init, dtype='float32', name='ux_uy')
+        #with tf.device(self._gpu):
+        self.ux_uy_2d_v = tf.Variable(ux_uy_init, dtype='float32', name='ux_uy')
         self.variables['ux_uy_2d_v'] = self.ux_uy_2d_v
 
     def _addPhaseVariable(self, phases_init=None):
@@ -101,8 +101,8 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         if phases_init is None:
             phases_init = np.zeros(self._npix_xy * self._sim.params.HKL_list.shape[0])
 
-        with tf.device(self._gpu):
-            self.phases_v = tf.Variable(phases_init, dtype='float32', name='phases')
+        #with tf.device(self._gpu):
+        self.phases_v = tf.Variable(phases_init, dtype='float32', name='phases')
         self.variables['phases'] = self.phases_v
     
     def _setInterpolationLimits(self):
@@ -154,8 +154,9 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         #self._scan_probe_pads_t = tf.constant([s.probe_pads for s in self._sim.simulations_per_peak], dtype='int32')
         #self._scan_probe_slice_indices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.probe_slices)
         #                                                for s in self._sim.simulations_per_peak], dtype='int32')
-        self._scan_probe_pads = [s.probe_pads for s in self._sim.simulations_per_peak]
-        self._scan_probe_slices = [s.probe_slices for s in self._sim.simulations_per_peak]
+        self._scan_probe_pads_t = tf.constant([s.probe_pads for s in self._sim.simulations_per_peak], dtype='int32')
+        self._scan_probe_slices_t = tf.constant([self._getStartStopIndicesFromSliceList(s.probe_slices) 
+                                                 for s in self._sim.simulations_per_peak], dtype='int32')
         
     @staticmethod
     def _getStartStopIndicesFromSliceList(slice_list):
@@ -299,12 +300,13 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         pcx = scan_coord_t[1]
 
         # again, a lot the the slicing and dicing
-        probe_pad = self._scan_probe_pads[bragg_index][scan_coord_index]
-        probe_slice = self._scan_probe_slices[bragg_index][scan_coord_index]
-
+        probe_pad = self._scan_probe_pads_t[bragg_index][scan_coord_index]
+        probe_slice = self._scan_probe_slices_t[bragg_index][scan_coord_index]
         # Slicing and reshaping to get the probe
+
         probe_this = self.probes_all_t[bragg_index]
-        probe_this = tf.pad(probe_this, probe_pad, mode='constant')[probe_slice]
+        probe_this = tf.pad(probe_this, probe_pad, mode='constant')[probe_slice[0]:probe_slice[1],
+                                                                    probe_slice[2]:probe_slice[3]]
         
         
         iloc1 = self._coords_iloc_t[bragg_index]
@@ -386,8 +388,13 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
 
 
 class DisplacementPhaseModel(MultiReflectionBraggPtychoFwdModel):
-    def __init__(self, sim: Simulation, phases_init: np.ndarray, ux_uy_2d_init: np.ndarray=None, **unused_kwargs):
+    def __init__(self, sim: Simulation, 
+                phases_init: np.ndarray, 
+                ux_uy_2d_init: np.ndarray=None, 
+                #gpu: str = '/gpu:0',
+                **unused_kwargs):
         self._sim = sim
+        #self._gpu = gpu
         self.variables = {}
 
         if phases_init is None:
@@ -413,8 +420,10 @@ class DisplacementFullForwardModel(MultiReflectionBraggPtychoFwdModel):
                  ux_uy_2d_init: np.ndarray=None,
                  magnitudes_init:np.ndarray=None,
                  magnitude_log_constraint_fn: Callable=None,
-                 shared_magnitudes: bool = True, **unused_kwargs):
-        super().__init__(sim)
+                 shared_magnitudes: bool = True, 
+                 #gpu: str = '/gpu:0',
+                 **unused_kwargs):
+        super().__init__(sim)#, gpu)
 
         self._shared_magnitudes = shared_magnitudes
         self._addDisplacementVariable(ux_uy_2d_init)
@@ -447,8 +456,10 @@ class PhaseOnlyFullForwardModel(MultiReflectionBraggPtychoFwdModel):
                  phases_init: np.ndarray=None,
                  magnitudes_init:np.ndarray=None,
                  magnitude_log_constraint_fn: Callable=None,
-                 shared_magnitudes: bool = True, **unused_kwargs):
-        super().__init__(sim)
+                 shared_magnitudes: bool = True, 
+                 #gpu:str = '/gpu:0',
+                 **unused_kwargs):
+        super().__init__(sim)#, gpu=gpu)
 
         self._shared_magnitudes = shared_magnitudes
         self._addPhaseVariable(phases_init)
@@ -480,8 +491,10 @@ class DisplacementProjectedForwardModel(MultiReflectionBraggPtychoFwdModel):
                  phases_init: np.ndarray=None,
                  magnitudes_init:np.ndarray=None,
                  magnitude_log_constraint_fn: Callable=None,
-                 shared_magnitudes: bool = True, **unused_kwargs):
-        super().__init__(sim)
+                 shared_magnitudes: bool = True, 
+                 #gpu:str = '/gpu:0',
+                 **unused_kwargs):
+        super().__init__(sim)#, gpu=gpu)
 
         self._shared_magnitudes = shared_magnitudes
         self._addPhaseVariable(phases_init)
