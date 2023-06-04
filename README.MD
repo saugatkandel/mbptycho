@@ -6,7 +6,9 @@ Contains code to simulate multi-angle Braggy Ptychography and reconstruction usi
 This is highly experimental code that is in development, so it is no supported and there are no guarantees it will work as intended.
 
 ## Authors:
-Saugat Kandel
-Siddharth Maddali
-Stephan Hruszkeywcz
+Saugat Kandel (Argonne National Laboratory)
+
+Siddharth Maddali (Previously at Argonne, now at KLA Corporation)
+
+Stephan Hruszkeywcz (Argonne National Laboratory)
 
