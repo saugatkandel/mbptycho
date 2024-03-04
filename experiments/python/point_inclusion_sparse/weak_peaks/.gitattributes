@@ -1,0 +1,17 @@
+direct_projected_uy_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+direct_no_projection_df_displacement_to_data_shared_mags.gz filter=lfs diff=lfs merge=lfs -text
+direct_no_projection_rho_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+direct_projected_ux_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+rho_phase_sep_mags.npz filter=lfs diff=lfs merge=lfs -text
+uy_displacement_to_phase.npz filter=lfs diff=lfs merge=lfs -text
+df_phase_shared_mags.gz filter=lfs diff=lfs merge=lfs -text
+sim_point_inclusion.lz4 filter=lfs diff=lfs merge=lfs -text
+direct_no_projection_ux_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+ux_displacement_to_phase.npz filter=lfs diff=lfs merge=lfs -text
+df_displacement_to_phase.gz filter=lfs diff=lfs merge=lfs -text
+direct_projected_df_displacement_to_data_shared_mags.gz filter=lfs diff=lfs merge=lfs -text
+direct_no_projection_uy_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+rho_phase_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
+df_phase_sep_mags.gz filter=lfs diff=lfs merge=lfs -text
+sample_point_inclusion.lz4 filter=lfs diff=lfs merge=lfs -text
+direct_projected_rho_displacement_to_data_shared_mags.npz filter=lfs diff=lfs merge=lfs -text
