@@ -1,7 +1,6 @@
 import tensorflow as tf
 import numpy as np
 import abc
-from typing import Union
 
 class LossFunctionT(abc.ABC):
     """
@@ -181,10 +180,6 @@ class PoissonLogLikelihoodSurrogateLossT(LossFunctionT):
 
     def map_data_fn(self, magnitude_measured_t):
         return magnitude_measured_t
-
-    @property
-    def data_type(self):
-        return "magnitude"
 
     @property
     def data_type(self):

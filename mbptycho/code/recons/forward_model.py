@@ -46,6 +46,24 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         npix_diffx = (self._nxr - self._npix_det) // 2
         self._proj_slice = np.s_[npix_diffy: self._nyr - npix_diffy, npix_diffx: self._nxr - npix_diffx]
     
+    def _setPixelsAndPadsNew(self):
+        self._npix_y = np.sum(np.sum(self._sim.sample.obj_mask_full, axis=(1, 2)) > 0)
+        self._npix_x = np.sum(np.sum(self._sim.sample.obj_mask_full, axis=(0, 2)) > 0)
+        self._npix_z = np.sum(np.sum(self._sim.sample.obj_mask_full, axis=(0, 1)) > 0)
+
+        self._npix_xy = self._npix_x * self._npix_y
+
+        self._nyr, self._nxr, self._nzr = self._sim.rhos[0].shape
+        self._pady0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(1, 2)))[0][0]
+        self._padx0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(0, 2)))[0][0]
+        self._padz0 = np.where(self._sim.sample.obj_mask_w_delta.sum(axis=(0, 1)))[0][0]
+        
+        self._npix_det = self._sim.params.npix_det
+        # projection slice based on number of pixels in the detector
+        npix_diffy = (self._nyr - self._npix_det) // 2
+        npix_diffx = (self._nxr - self._npix_det) // 2
+        self._proj_slice = np.s_[npix_diffy: self._nyr - npix_diffy, npix_diffx: self._nxr - npix_diffx]
+    
     def _setScanCoords(self):
 
         if hasattr(self._sim.simulations_per_peak[0], "ptycho_scan_positions"):
@@ -176,7 +194,7 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
         This function calculates and stores the matrix (A^T A)^(-1) A^T  for the unwrapped phases -> displacement
         transformation.
         """
-        hkl_matrix = np.array(self._sim.params.HKL_list)[:, :2]  # Ignoring the z components
+        hkl_matrix = np.array(self._sim.params.HKL_list)[:, :2] #/ self._sim.sample.params.lattice[0]  # Ignoring the z components
         inversion_matrix = np.linalg.inv(hkl_matrix.T @ hkl_matrix) @ hkl_matrix.T / (2 * np.pi)
         self._displacement_invert_matrix_t = tf.constant(inversion_matrix, dtype='float32')
     
@@ -203,7 +221,8 @@ class MultiReflectionBraggPtychoFwdModel(abc.ABC):
     def _get2dPhasesFromDisplacements(self, Ux_t, Uy_t):
         phases_all_t = []
         for H, K, L in self._sim.params.HKL_list:
-            t1 = H * Ux_t + K * Uy_t #+ L * Uz_t
+            t1 = (H * Ux_t #/ self._sim.sample.params.lattice[0] 
+                  + K * Uy_t) #/ self._sim.sample.params.lattice[1])#+ L * Uz_t
             phase_t = 2 * np.pi * t1
             phases_all_t.append(phase_t)
         phases_all_t = tf.stack(phases_all_t)
@@ -438,7 +457,6 @@ class DisplacementFullForwardModel(MultiReflectionBraggPtychoFwdModel):
 
         # Getting the predicted diffraction data. Using a map is faster than a for loop.
         proj_map_fn = lambda indx: self._getProjFtT(rho_3d_bordered_all_t, indx)
-        print(batch_input_v)
         batch_predictions_t = tf.map_fn(proj_map_fn,
                                         batch_input_v, dtype=tf.float32)
                                        # fn_output_signature=[])

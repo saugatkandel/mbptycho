@@ -1,8 +1,5 @@
 import numpy as np
 import tensorflow as tf
-from typing import Callable
-from skimage.restoration import unwrap_phase
-from functools import partial
 
 
 from mbptycho.code.recons.datalogs import DataLogs
@@ -65,7 +62,7 @@ class DisplacementFromPhaseReconstruction(BaseReconstructionT):
 
     def minimize(self, *args, **kwargs):
 
-        if self._finalized != True:
+        if not self._finalized:
             self.finalizeInit()
 
         unwrapped = self.getUnwrappedPhases(self.fwd_model.phases_v)
@@ -195,11 +192,10 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
         magnitudes_t = self.fwd_model.getMagnitudes2d(self.fwd_model.magnitudes_log_v).numpy()
         self.rho_2d = self.fwd_model.get2dRhoFromDisplacements(ux_2d_t, uy_2d_t, magnitudes_t).numpy()
 
-
     @tf.function
-    def optimizersMinimize(self, iters_before_registration: tf.Tensor):
+    def optimizersMinimizeOld(self, iters_before_registration: tf.Tensor):
         objective_array = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
-
+        
         for i in tf.range(iters_before_registration):
             self._genNewTrainBatch()
 
@@ -207,6 +203,7 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
                 preds = self._batch_train_preds_fn(ux_uy_2d_v=self.fwd_model.ux_uy_2d_v,
                                                    magnitudes_log_v=self.fwd_model.magnitudes_log_v)
                 loss = self._train_loss_fn(preds)
+            
             u_grad, m_grad = gt.gradient(loss, [self.fwd_model.ux_uy_2d_v, self.fwd_model.magnitudes_log_v])
 
             self.optimizers['ux_uy_2d_v']['optimizer'].apply_gradients(zip([u_grad], [self.fwd_model.ux_uy_2d_v]))
@@ -215,6 +212,49 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
 
             if self.unwrap_phase_proj:
                 phases = self.fwd_model.get2dPhasesFromDisplacementVars()
+                phases_wrapped = tf.math.angle(tf.complex(tf.math.cos(phases), tf.math.sin(phases)))
+                unwrapped = self.getUnwrappedPhases(tf.reshape(phases_wrapped, [-1]))
+                new_disps = self.convertPhaseToDisplacement(unwrapped)
+                self.fwd_model.ux_uy_2d_v.assign(tf.reshape(new_disps, [-1]))
+
+            objective_array = objective_array.write(i, loss)
+            self.iteration.assign_add(1)
+
+        return objective_array.stack()
+
+    @tf.function
+    def optimizersMinimize(self, iters_before_registration: tf.Tensor):
+        objective_array = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
+        
+        opt_us = self.optimizers['ux_uy_2d_v']['optimizer']
+        opt_mags = self.optimizers['magnitudes_log_v']['optimizer']
+        
+        for i in tf.range(iters_before_registration):
+            self._genNewTrainBatch()
+
+            with tf.GradientTape(persistent=True) as gt:
+                preds = self._batch_train_preds_fn(ux_uy_2d_v=self.fwd_model.ux_uy_2d_v,
+                                                   magnitudes_log_v=self.fwd_model.magnitudes_log_v)
+                loss = self._train_loss_fn(preds)
+                
+                scaled_loss_us = opt_us.get_scaled_loss(loss)
+                scaled_loss_mags = opt_mags.get_scaled_loss(loss)
+            
+            #scaled_u_grad, scaled_m_grad = gt.gradient(scaled_loss_us, 
+            #                                           [self.fwd_model.ux_uy_2d_v, 
+            #                                            self.fwd_model.magnitudes_log_v])
+            scaled_u_grad = gt.gradient(scaled_loss_us, self.fwd_model.ux_uy_2d_v)
+            scaled_m_grad = gt.gradient(scaled_loss_mags, self.fwd_model.magnitudes_log_v)
+            
+            
+            us_grad = opt_us.get_unscaled_gradients([scaled_u_grad])
+            mags_grad = opt_mags.get_unscaled_gradients([scaled_m_grad])
+            opt_us.apply_gradients(zip(us_grad, [self.fwd_model.ux_uy_2d_v]))
+            opt_mags.apply_gradients(zip(mags_grad, [self.fwd_model.magnitudes_log_v]))
+
+            if self.unwrap_phase_proj:
+                phases = self.fwd_model.get2dPhasesFromDisplacementVars()
+                #phases_wrapped = tf.math.angle(tf.complex(tf.math.cos(phases), tf.math.sin(phases)))
                 unwrapped = self.getUnwrappedPhases(tf.reshape(phases, [-1]))
                 new_disps = self.convertPhaseToDisplacement(unwrapped)
                 self.fwd_model.ux_uy_2d_v.assign(tf.reshape(new_disps, [-1]))
@@ -237,6 +277,7 @@ class DisplacementFullModelReconstruction(BaseReconstructionT):
 
         for i in range(max_epochs):
             losses_array = self.optimizersMinimize(tf.constant(self._iterations_per_epoch)).numpy()
+            #print(losses_array)
             #losses_array = [1.0] * (self._iterations_per_epoch - 1)
             self.updateOutputs()
             if len(losses_array) > 1:
@@ -331,8 +372,6 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
                                                                                      False),
                                           log_epoch_frequency=log_frequency)
 
-        def temp_fn():
-            print(indx)
 
         for indx in range(self._rho_true.shape[0]):
 
@@ -356,6 +395,48 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
     @tf.function
     def optimizersMinimize(self, iters_before_registration: tf.Tensor):
         objective_array = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
+        
+        opt_phs = self.optimizers['phases_v']['optimizer']
+        opt_mags = self.optimizers['magnitudes_log_v']['optimizer']
+        
+        for i in tf.range(iters_before_registration):
+            self._genNewTrainBatch()
+
+            with tf.GradientTape(persistent=True) as gt:
+                preds = self._batch_train_preds_fn(phases_v=self.fwd_model.phases_v,
+                                                   magnitudes_log_v=self.fwd_model.magnitudes_log_v)
+                loss = self._train_loss_fn(preds)
+                
+                scaled_loss_phs = opt_phs.get_scaled_loss(loss)
+                scaled_loss_mags = opt_mags.get_scaled_loss(loss)
+            
+            #scaled_u_grad, scaled_m_grad = gt.gradient(scaled_loss_us, 
+            #                                           [self.fwd_model.ux_uy_2d_v, 
+            #                                            self.fwd_model.magnitudes_log_v])
+            scaled_ph_grad = gt.gradient(scaled_loss_phs, self.fwd_model.phases_v)
+            scaled_m_grad = gt.gradient(scaled_loss_mags, self.fwd_model.magnitudes_log_v)
+            
+            
+            phs_grad = opt_phs.get_unscaled_gradients([scaled_ph_grad])
+            mags_grad = opt_mags.get_unscaled_gradients([scaled_m_grad])
+            opt_phs.apply_gradients(zip(phs_grad, [self.fwd_model.phases_v]))
+            opt_mags.apply_gradients(zip(mags_grad, [self.fwd_model.magnitudes_log_v]))
+                
+                
+                
+            #u_grad, m_grad = gt.gradient(loss, [self.fwd_model.phases_v, self.fwd_model.magnitudes_log_v])
+
+            #self.optimizers['phases_v']['optimizer'].apply_gradients(zip([u_grad], [self.fwd_model.phases_v]))
+            #self.optimizers['magnitudes_log_v']['optimizer'].apply_gradients(zip([m_grad],
+            #                                                                     [self.fwd_model.magnitudes_log_v]))
+            objective_array = objective_array.write(i, loss)
+            self.iteration.assign_add(1)
+
+        return objective_array.stack()
+    
+    @tf.function
+    def optimizersMinimizeOld(self, iters_before_registration: tf.Tensor):
+        objective_array = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
 
         for i in tf.range(iters_before_registration):
             self._genNewTrainBatch()
@@ -364,6 +445,11 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
                 preds = self._batch_train_preds_fn(phases_v=self.fwd_model.phases_v,
                                                    magnitudes_log_v=self.fwd_model.magnitudes_log_v)
                 loss = self._train_loss_fn(preds)
+                
+                
+                
+                
+                
             u_grad, m_grad = gt.gradient(loss, [self.fwd_model.phases_v, self.fwd_model.magnitudes_log_v])
 
             self.optimizers['phases_v']['optimizer'].apply_gradients(zip([u_grad], [self.fwd_model.phases_v]))
@@ -373,6 +459,7 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
             self.iteration.assign_add(1)
 
         return objective_array.stack()
+    
 
     def minimize(self, max_epochs: int = 500,
                 debug_output: bool = True,
@@ -387,6 +474,7 @@ class PhaseOnlyReconstruction(BaseReconstructionT):
 
         for i in range(max_epochs):
             losses_array = self.optimizersMinimize(tf.constant(self._iterations_per_epoch)).numpy()
+            #print(losses_array)
             #losses_array = [1.0] * (self._iterations_per_epoch - 1)
             self.updateOutputs()
             if len(losses_array) > 1:

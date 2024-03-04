@@ -1,6 +1,5 @@
 from pandas import DataFrame
 import numpy as np
-import tensorflow as tf
 import dataclasses as dt
 from typing import Callable
 from skimage.feature import register_translation as _register_translation_2d
@@ -24,11 +23,11 @@ class CustomFunctionMetric(SimpleMetric):
     def __post_init__(self):
         if self.registration and self.true is None:
             e = ValueError("Require true data for registration.")
-            logger.error(e)
+            #logger.error(e)
             raise e
         if self.normalized_lse and self.true is None:
             e = ValueError("Require true data for normalized error.")
-            logger.error(e)
+            #logger.error(e)
             raise e
         if not (self.registration or self.normalized_lse):
             self.columns = [self.title]
@@ -68,10 +67,11 @@ class DataLogs:
         if len(test.shape) == 2:
             registration_fn = _register_translation_2d
         elif len(test.shape) == 3:
-            registration_fn = _register_translation_3d
+            raise NotImplementedError
+            #registration_fn = _register_translation_3d
         else:
             e = ValueError("Subpixel registration only available for 2d and 3d objects.")
-            logger.error(e)
+            #logger.error(e)
             raise e
         shift, err, phase = registration_fn(test, true, upsample_factor=10)
         shift, err, phase = registration_fn(test * np.exp(-1j * phase), true, upsample_factor=10)
@@ -150,7 +150,8 @@ class DataLogs:
         if not hasattr(self, "dataframe"):
             e = AttributeError("Cannot add item to the log file after starting the optimization. "
                                + "The log file remains unchanged. Only the print output is affected.")
-            logger.warning(e)
+            #logger.warning(e)
+            print("WARNING: ", e)
 
     #def _saveCheckpoint(self, iteration):
     #    if not hasattr(self, "_name"):

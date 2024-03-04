@@ -9,10 +9,7 @@ from functools import partial
 from skimage.registration import phase_cross_correlation
 from skimage.restoration import unwrap_phase
 
-import tensorflow_probability as tfp
 from mbptycho.code.simulation import Simulation
-import mbptycho.code.recons.forward_model as fwmodel
-import mbptycho.code.recons.datalogs
 from mbptycho.code.recons.options import OPTIONS
 from mbptycho.code.recons.forward_model import MultiReflectionBraggPtychoFwdModel
 from mbptycho.code.recons.datalogs import DataLogs
@@ -265,10 +262,10 @@ class BaseReconstructionT(abc.ABC):
     def _checkAttr(self, attr_to_check, attr_this):
         if not hasattr(self, attr_to_check):
             e = AttributeError(f"First attach a {attr_to_check} before attaching {attr_this}.")
-            logger.error(e)
+            #logger.error(e)
             raise e
 
-    def setDisplacementAdamOptimizer(self, learning_rate):
+    def setDisplacementAdamOptimizerOld(self, learning_rate):
         if not hasattr(self, "optimizers"):
             self.optimizers = {}
         if not hasattr(self.fwd_model, "ux_uy_2d_v"):
@@ -277,8 +274,18 @@ class BaseReconstructionT(abc.ABC):
         self.optimizers['ux_uy_2d_v'] = {'learning_rate': lr_var,
                                            'optimizer': tf.keras.optimizers.Adam(lr_var),
                                            'var': self.fwd_model.ux_uy_2d_v}
+    def setDisplacementAdamOptimizer(self, learning_rate):
+        if not hasattr(self, "optimizers"):
+            self.optimizers = {}
+        if not hasattr(self.fwd_model, "ux_uy_2d_v"):
+            raise ValueError(f"Cannot optimize for the displacement variable in the '{self._model_type}' forward model")
+        lr_var = tf.Variable(learning_rate, dtype='float32')
+        self.optimizers['ux_uy_2d_v'] = {'learning_rate': lr_var,
+                                           'optimizer': 
+                                         tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(lr_var)),
+                                           'var': self.fwd_model.ux_uy_2d_v}
 
-    def setMagnitudeLogAdamOptimizer(self, learning_rate):
+    def setMagnitudeLogAdamOptimizerOld(self, learning_rate):
         if not hasattr(self, "optimizers"):
             self.optimizers = {}
         if not hasattr(self.fwd_model, "magnitudes_log_v"):
@@ -286,6 +293,16 @@ class BaseReconstructionT(abc.ABC):
         lr_var = tf.Variable(learning_rate, dtype='float32')
         self.optimizers['magnitudes_log_v'] = {'learning_rate': lr_var,
                                         'optimizer': tf.keras.optimizers.Adam(lr_var),
+                                        'var': self.fwd_model.magnitudes_log_v}
+    def setMagnitudeLogAdamOptimizer(self, learning_rate):
+        if not hasattr(self, "optimizers"):
+            self.optimizers = {}
+        if not hasattr(self.fwd_model, "magnitudes_log_v"):
+            raise ValueError(f"Cannot optimize for the magnitude variable in the '{self._model_type}' forward model")
+        lr_var = tf.Variable(learning_rate, dtype='float32')
+        self.optimizers['magnitudes_log_v'] = {'learning_rate': lr_var,
+                                        'optimizer':
+                                            tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(lr_var)),
                                         'var': self.fwd_model.magnitudes_log_v}
 
     def setPhaseAdamOptimizer(self, learning_rate):
@@ -295,7 +312,9 @@ class BaseReconstructionT(abc.ABC):
             raise ValueError(f"Cannot optimize for the phase variable in the '{self._model_type}' forward model")
         lr_var = tf.Variable(learning_rate, dtype='float32')
         self.optimizers['phases_v'] = {'learning_rate': lr_var,
-                                    'optimizer': tf.keras.optimizers.Adam(lr_var),
+                                    'optimizer': 
+                                       tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(lr_var)),
+                                       #tf.keras.optimizers.Adam(lr_var),
                                     'var': self.fwd_model.phases_v}
 
     def convertPhaseToDisplacement(self, phase_flat):
@@ -331,7 +350,8 @@ class BaseReconstructionT(abc.ABC):
         else:
             if registration and normalized_lse:
                 e =  ValueError("Only one of 'registration' or 'normalized lse' should be true.")
-                logger.error(e)
+                #logger.error(e)
+                raise e
 
             self.datalog.addCustomFunctionMetric(title=title,
                                                func=func,
@@ -353,7 +373,6 @@ class BaseReconstructionT(abc.ABC):
         return output_2d
 
     def _getRegistrationErrors(self, test, true, film_only=False, subtract_mean=False):
-        import matplotlib.pyplot as plt
         if film_only:
             test = self._get2DFilmOnly(test)
             true = self._get2DFilmOnly(true)
